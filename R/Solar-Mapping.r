@@ -2,9 +2,7 @@ library(shiny)
 library(raster)
 library(dbscan)
 
-# Caminho fixo para o diretório de imagens
 dirPath <- "/media/paulojaka/HD_150g/TCC/imagens particionadas-20250209T002945Z-001/imagens particionadas/SC_24_Z_D_I_2_NE_A_II_1_D_rescaled"
-# Lista todos os arquivos .tif dentro do diretório fixo
 imgFiles <- list.files(dirPath, pattern = "\\.tif$", full.names = TRUE)
 
 ui <- fluidPage(

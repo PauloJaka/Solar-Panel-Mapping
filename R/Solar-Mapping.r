@@ -9,12 +9,10 @@ library(jsonlite)
 library(shinydashboard)
 library(shinyBS)
 
-# Módulo para carregar arquivos
 loadImageFiles <- function(dirPath) {
   list.files(dirPath, pattern = "\\.tif$", full.names = TRUE)
 }
 
-# Módulo para conexão com banco de dados
 getDBConnection <- function(host, dbname, user, password, port = 5432) {
   dbConnect(
     RPostgres::Postgres(),
@@ -26,12 +24,25 @@ getDBConnection <- function(host, dbname, user, password, port = 5432) {
   )
 }
 
-# Módulo para processamento DBSCAN
+resizeImage <- function(img, maxSize) {
+  imgDims <- c(nrow(img), ncol(img))
+  maxDim <- max(imgDims)
+  
+  if (maxDim > maxSize) {
+    scaleFactor <- maxSize / maxDim
+    newRows <- round(nrow(img) * scaleFactor)
+    newCols <- round(ncol(img) * scaleFactor)
+    
+    img <- aggregate(img, fact = c(nrow(img)/newRows, ncol(img)/newCols), fun = mean)
+  }
+  
+  return(img)
+}
+
 runDBSCAN <- function(img, eps_val, minPts_val) {
   val <- getValues(img)
   coords <- coordinates(img)
   
-  # Extrair valores RGB
   rgb_values <- NULL
   if (nlayers(img) >= 3) {
     rgb_values <- cbind(
@@ -43,10 +54,8 @@ runDBSCAN <- function(img, eps_val, minPts_val) {
   
   val <- cbind(val, coords)
   
-  # Executar DBSCAN
   dbScanResult <- dbscan(val, eps = eps_val, minPts = minPts_val)
   
-  # Resultados
   return(list(
     clusters = dbScanResult$cluster,
     coords = coords,
@@ -54,30 +63,22 @@ runDBSCAN <- function(img, eps_val, minPts_val) {
   ))
 }
 
-# Módulo para salvar clusters no banco
 saveClustersToDB <- function(imgName, clusterNumbers, clusters, coords, rgb_values, eps, minPts, solarClusters, 
                              dbHost, dbName, dbUser, dbPassword) {
-  # Conectar ao banco de dados
   conn <- getDBConnection(dbHost, dbName, dbUser, dbPassword)
   insertedCount <- 0
   
-  # Adicionar coluna RGB se não existir
   tryCatch({
     dbExecute(conn, "ALTER TABLE clusters_detectados_solar_rec ADD COLUMN IF NOT EXISTS rgb_values jsonb")
   }, error = function(e) {
-    # Ignora erro se a coluna já existir
   })
   
-  # Processar cada cluster
   for(clusterId in clusterNumbers) {
-    # Determinar quais pontos pertencem a este cluster
     I <- clusters == clusterId
     clusterCoords <- coords[I, ]
     
-    # Converter coordenadas para JSON
     coordsJSON <- toJSON(clusterCoords)
     
-    # Extrair valores RGB para este cluster
     clusterRGB <- NULL
     if (!is.null(rgb_values)) {
       clusterRGB <- rgb_values[I, ]
@@ -86,15 +87,12 @@ saveClustersToDB <- function(imgName, clusterNumbers, clusters, coords, rgb_valu
       rgbJSON <- "null"
     }
     
-    # Verificar se é um cluster solar marcado
     isSolar <- ifelse(clusterId %in% solarClusters, 1, 0)
     
-    # Preparar query SQL de inserção
     query <- "INSERT INTO clusters_detectados_solar_rec 
               (image_name, id_cluster, is_solar, eps, minPts, coords, rgb_values) 
               VALUES ($1, $2, $3, $4, $5, $6, $7)"
     
-    # Executar a inserção
     dbExecute(
       conn, 
       query, 
@@ -112,16 +110,13 @@ saveClustersToDB <- function(imgName, clusterNumbers, clusters, coords, rgb_valu
     insertedCount <- insertedCount + 1
   }
   
-  # Desconectar do banco
   dbDisconnect(conn)
   
   return(insertedCount)
 }
 
-# Caminho fixo para o diretório de imagens
-dirPath <- "/media/paulojaka/HD_500g/SC_24_Z_D_I_2_NE_A_II_1_D_rescaled-20250223T001141Z-001/SC_24_Z_D_I_2_NE_A_II_1_D_rescaled"
+dirPath <- "~/Documents/TCC/SC_24_Z_D_I_2_NE_A_II_1_D_rescaled"
 
-# Configurações do banco de dados
 db_config <- list(
   host = "",
   name = "",
@@ -129,7 +124,6 @@ db_config <- list(
   password = "."
 )
 
-# UI customizada e mais compacta
 ui <- dashboardPage(
   skin = "black",
   dashboardHeader(title = "Detector de Painéis Solares", titleWidth = 250),
@@ -182,7 +176,6 @@ ui <- dashboardPage(
     tags$div(
       style = "padding: 10px;",
       
-      # Navegação de Imagens
       box(
         width = NULL,
         status = "primary",
@@ -199,7 +192,17 @@ ui <- dashboardPage(
         verbatimTextOutput("image_info", placeholder = TRUE)
       ),
       
-      # DBSCAN
+      box(
+        width = NULL,
+        status = "warning",
+        title = "Configuração de Imagem",
+        solidHeader = TRUE,
+        collapsible = TRUE,
+        sliderInput("maxImageSize", "Tamanho máximo da imagem (pixels):", 
+                    min = 200, max = 3000, value = 1000, step = 50),
+        tags$small("Imagens maiores serão redimensionadas para melhor performance")
+      ),
+      
       box(
         width = NULL,
         status = "info",
@@ -212,12 +215,12 @@ ui <- dashboardPage(
     }
   ")),
         sliderInput("eps", "Valor de eps:", min = 0.1, max = 10, value = 2, step = 0.1),
-        sliderInput("minPts", "Valor de minPts:", min = 1, max = 200, value = 50, step = 1),
+        sliderInput("minPts", "Valor de minPts:", min = 5, max = 200, value = 50, step = 1),
+        tags$small("MinPts mínimo: 5 (valores menores tornam o processamento mais pesado)"),
         actionButton("scanButton", "Executar DBSCAN", icon = icon("play"), 
                      class = "btn-white btn-block")
       ),
       
-      # Navegação de Clusters
       box(
         width = NULL,
         status = "success",
@@ -239,7 +242,6 @@ ui <- dashboardPage(
                      class = "btn-white btn-block")
       ),
       
-      # Clusters Solares Selecionados
       box(
         width = NULL,
         status = "warning",
@@ -248,18 +250,17 @@ ui <- dashboardPage(
         collapsible = TRUE,
         div(
           class = "solar-clusters-container", 
-          style = "color: black;",  # Adiciona cor preta ao texto
+          style = "color: black;",
           uiOutput("solarClustersList")
         ),
         tags$br(),
         div(
-          style = "display: flex; justify-content: space-between; color: black;",  # Adiciona cor preta aqui também
+          style = "display: flex; justify-content: space-between; color: black;",
           actionButton("clearSolarClusters", "Limpar Todos", icon = icon("trash"),
                        class = "btn-white", style = "width: 100%")
         )
       ),
       
-      # Banco de Dados
       box(
         width = NULL,
         status = "danger",
@@ -299,13 +300,13 @@ ui <- dashboardPage(
 )
 
 server <- function(input, output, session) {
-  # Carregar imagens
   imgFiles <- loadImageFiles(dirPath)
   
   rValues <- reactiveValues(
     imgFiles = imgFiles,
     currentIndex = 1,
     img = NULL,
+    originalImg = NULL,
     clusters = NULL,
     coords = NULL,
     rgb_values = NULL,
@@ -313,33 +314,51 @@ server <- function(input, output, session) {
     dbStatus = "",
     clusterNumbers = NULL,
     currentClusterIndex = 1,
-    solarClusters = c(), # Lista para armazenar clusters marcados como painéis solares
-    cachedClusterPlots = list(), # Cache para plots de clusters
-    clustersProcessed = FALSE    # Flag para indicar se os clusters já foram processados
+    solarClusters = c(),
+    cachedClusterPlots = list(),
+    clustersProcessed = FALSE
   )
   
-  # Inicializar imagem se disponível
   observe({
     if (length(rValues$imgFiles) > 0 && is.null(rValues$img)) {
-      rValues$img <- brick(rValues$imgFiles[1])
+      rValues$originalImg <- brick(rValues$imgFiles[1])
+      rValues$img <- resizeImage(rValues$originalImg, input$maxImageSize)
     }
   })
   
-  # Informações da imagem atual
+  observeEvent(input$maxImageSize, {
+    if (!is.null(rValues$originalImg)) {
+      rValues$img <- resizeImage(rValues$originalImg, input$maxImageSize)
+      rValues$clusters <- NULL
+      rValues$plotCluster <- 0
+      rValues$solarClusters <- c()
+      rValues$cachedClusterPlots <- list()
+      rValues$clustersProcessed <- FALSE
+      updateSelectInput(session, "selectedCluster", choices = NULL)
+    }
+  })
+  
   output$image_info <- renderText({
     req(rValues$imgFiles)
-    paste0(
+    imgInfo <- paste0(
       basename(rValues$imgFiles[rValues$currentIndex]), 
       "\n(", rValues$currentIndex, "/", length(rValues$imgFiles), ")"
     )
+    
+    if (!is.null(rValues$img)) {
+      imgInfo <- paste0(
+        imgInfo,
+        "\nDimensões: ", ncol(rValues$img), "x", nrow(rValues$img)
+      )
+    }
+    
+    return(imgInfo)
   })
   
-  # Renderizar imagem
   output$raster <- renderPlot({
     req(rValues$img)
     plotRGB(rValues$img)
     
-    # Plotar todos os clusters solares selecionados
     if (!is.null(rValues$clusters) && length(rValues$solarClusters) > 0) {
       for (solar_cluster in rValues$solarClusters) {
         I <- rValues$clusters == solar_cluster
@@ -347,7 +366,6 @@ server <- function(input, output, session) {
       }
     }
     
-    # Plotar o cluster atualmente visualizado
     if (!is.null(rValues$clusters) && rValues$plotCluster > 0 && 
         !(rValues$plotCluster %in% rValues$solarClusters)) {
       I <- rValues$clusters == rValues$plotCluster
@@ -355,18 +373,17 @@ server <- function(input, output, session) {
     }
   })
   
-  # Navegação entre imagens
   observeEvent(input$nextImage, {
     req(rValues$imgFiles)
     if (rValues$currentIndex < length(rValues$imgFiles)) {
       rValues$currentIndex <- rValues$currentIndex + 1
-      rValues$img <- brick(rValues$imgFiles[rValues$currentIndex])
-      # Resetar clusters
+      rValues$originalImg <- brick(rValues$imgFiles[rValues$currentIndex])
+      rValues$img <- resizeImage(rValues$originalImg, input$maxImageSize)
       rValues$clusters <- NULL
       rValues$plotCluster <- 0
-      rValues$solarClusters <- c() # Reset solar clusters
-      rValues$cachedClusterPlots <- list() # Limpar cache
-      rValues$clustersProcessed <- FALSE # Resetar flag de processamento
+      rValues$solarClusters <- c()
+      rValues$cachedClusterPlots <- list()
+      rValues$clustersProcessed <- FALSE
       updateSelectInput(session, "selectedCluster", choices = NULL)
     }
   })
@@ -375,34 +392,31 @@ server <- function(input, output, session) {
     req(rValues$imgFiles)
     if (rValues$currentIndex > 1) {
       rValues$currentIndex <- rValues$currentIndex - 1
-      rValues$img <- brick(rValues$imgFiles[rValues$currentIndex])
-      # Resetar clusters
+      rValues$originalImg <- brick(rValues$imgFiles[rValues$currentIndex])
+      rValues$img <- resizeImage(rValues$originalImg, input$maxImageSize)
       rValues$clusters <- NULL
       rValues$plotCluster <- 0
-      rValues$solarClusters <- c() # Reset solar clusters
-      rValues$cachedClusterPlots <- list() # Limpar cache
-      rValues$clustersProcessed <- FALSE # Resetar flag de processamento
+      rValues$solarClusters <- c()
+      rValues$cachedClusterPlots <- list()
+      rValues$clustersProcessed <- FALSE
       updateSelectInput(session, "selectedCluster", choices = NULL)
     }
   })
   
-  # Executar DBSCAN
   observeEvent(input$scanButton, {
     req(rValues$img)
     
     withProgress(message = 'Executando DBSCAN...', value = 0, {
-      # Executar DBSCAN usando o módulo
       result <- runDBSCAN(rValues$img, input$eps, input$minPts)
       
       rValues$clusters <- result$clusters
       rValues$coords <- result$coords
       rValues$rgb_values <- result$rgb_values
       rValues$plotCluster <- 0
-      rValues$solarClusters <- c() # Reset solar clusters
+      rValues$solarClusters <- c()
       
-      # Processar clusters
       clusterNumbers <- sort(unique(rValues$clusters))
-      clusterNumbers <- clusterNumbers[clusterNumbers != 0] # Remover outliers
+      clusterNumbers <- clusterNumbers[clusterNumbers != 0]
       rValues$clusterNumbers <- clusterNumbers
       rValues$currentClusterIndex <- ifelse(length(clusterNumbers) > 0, 1, 0)
       
@@ -412,17 +426,14 @@ server <- function(input, output, session) {
         updateSelectInput(session, "selectedCluster", choices = NULL)
       }
       
-      # Limpar cache e gerar novos plots de clusters
       rValues$cachedClusterPlots <- list()
       rValues$clustersProcessed <- TRUE
       
-      # Criar cache de plots para cada cluster (para melhorar performance)
       incProgress(0.2, detail = "Gerando visualizações...")
       
-      # Gerar plots de clusters em lotes para evitar travamento da UI
       total_clusters <- length(clusterNumbers)
       if (total_clusters > 0) {
-        batch_size <- min(20, total_clusters)  # Processa no máximo 20 clusters por vez
+        batch_size <- min(20, total_clusters)
         batches <- ceiling(total_clusters / batch_size)
         
         for (b in 1:batches) {
@@ -434,7 +445,6 @@ server <- function(input, output, session) {
             I <- rValues$clusters == clust
             pointCount <- sum(I)
             
-            # Gerar e armazenar o plot em cache
             rValues$cachedClusterPlots[[as.character(clust)]] <- list(
               coords = rValues$coords[I, ],
               count = pointCount
@@ -446,12 +456,10 @@ server <- function(input, output, session) {
         }
       }
       
-      # Atualizar visualização
       updateClusterCollage()
     })
   })
   
-  # Atualizar colagem de clusters - usando cache
   updateClusterCollage <- function() {
     output$clusterCollage <- renderPlot({
       req(rValues$clustersProcessed, rValues$clusterNumbers)
@@ -462,10 +470,8 @@ server <- function(input, output, session) {
                  theme_void())
       }
       
-      # Exibir todos os clusters usando os dados em cache
       numClusters <- length(rValues$clusterNumbers)
       
-      # Cálculo do layout
       ncols <- ceiling(sqrt(min(numClusters, 30)))
       
       clusterPlots <- lapply(rValues$clusterNumbers, function(clust) {
@@ -476,7 +482,6 @@ server <- function(input, output, session) {
           coords_df <- as.data.frame(cached_data$coords)
           pointCount <- cached_data$count
           
-          # Define cores diferentes para clusters solares selecionados
           if (clust %in% rValues$solarClusters) {
             pointColor <- "green"
             titlePrefix <- "✓ Solar: "
@@ -498,7 +503,6 @@ server <- function(input, output, session) {
               plot.margin = margin(2, 2, 2, 2)
             )
         } else {
-          # Fallback se o cache não estiver disponível
           I <- rValues$clusters == clust
           pointCount <- sum(I)
           
@@ -525,51 +529,44 @@ server <- function(input, output, session) {
         }
       })
       
-      # Ajusta a altura do plot para acomodar todos os clusters
       p <- do.call(grid.arrange, c(clusterPlots, ncol = ncols))
       return(p)
     }, height = function() {
       req(rValues$clusterNumbers)
-      # Calcular altura baseada no número de clusters
       numClusters <- length(rValues$clusterNumbers)
       if (numClusters == 0) return(300)
       
       ncols <- ceiling(sqrt(min(numClusters, 30)))
       nrows <- ceiling(numClusters / ncols)
       
-      # Altura mínima de 300px, depois escala proporcionalmente
       return(max(300, nrows * 150))
     })
   }
   
-  # Adicionar cluster como painel solar
   observeEvent(input$addSolarCluster, {
     req(rValues$clusters)
     selectedCluster <- as.numeric(input$selectedCluster)
     
     if (!is.na(selectedCluster) && !(selectedCluster %in% rValues$solarClusters)) {
       rValues$solarClusters <- c(rValues$solarClusters, selectedCluster)
-      updateClusterCollage() # Atualizar visualização para mostrar seleção
+      updateClusterCollage()
     }
   })
   
-  # Remover cluster individual da seleção de painéis solares
   observeEvent(input$removeSolarCluster, {
     clusterToRemove <- as.numeric(input$removeSolarCluster)
     
     if (!is.na(clusterToRemove) && clusterToRemove %in% rValues$solarClusters) {
       rValues$solarClusters <- rValues$solarClusters[rValues$solarClusters != clusterToRemove]
-      updateClusterCollage() # Atualizar visualização
+      updateClusterCollage()
     }
   })
   
-  # Limpar seleção de clusters solares
   observeEvent(input$clearSolarClusters, {
     rValues$solarClusters <- c()
     updateClusterCollage()
   })
   
-  # Interface para lista de clusters solares selecionados
   output$solarClustersList <- renderUI({
     if (length(rValues$solarClusters) == 0) {
       return(p("Nenhum cluster selecionado como painel solar."))
@@ -587,7 +584,6 @@ server <- function(input, output, session) {
         )
       })
       
-      # Adicionar contagem total
       clusterItems <- c(
         clusterItems,
         div(style = "margin-top: 10px; font-weight: bold;",
@@ -598,19 +594,16 @@ server <- function(input, output, session) {
     }
   })
   
-  # Visualizar cluster selecionado
   observeEvent(input$plotSelectedCluster, {
     req(rValues$clusters)
     selectedCluster <- as.numeric(input$selectedCluster)
     if (!is.na(selectedCluster)) {
       rValues$plotCluster <- selectedCluster
       rValues$currentClusterIndex <- which(rValues$clusterNumbers == selectedCluster)
-      # Não reprocessamos toda a colagem, apenas atualizamos a visualização
       updateClusterCollage()
     }
   })
   
-  # Botão para cluster anterior
   observeEvent(input$prevCluster, {
     req(rValues$clusterNumbers)
     if (length(rValues$clusterNumbers) > 0) {
@@ -627,7 +620,6 @@ server <- function(input, output, session) {
     }
   })
   
-  # Botão para próximo cluster
   observeEvent(input$nextCluster, {
     req(rValues$clusterNumbers)
     if (length(rValues$clusterNumbers) > 0) {
@@ -644,16 +636,13 @@ server <- function(input, output, session) {
     }
   })
   
-  # Salvar clusters no banco de dados
   observeEvent(input$saveAllClusters, {
     req(rValues$clusters)
     
     withProgress(message = 'Salvando clusters...', value = 0, {
       tryCatch({
-        # Obter nome da imagem
         imageName <- basename(rValues$imgFiles[rValues$currentIndex])
         
-        # Obter clusters (exceto outliers)
         clusterNumbers <- sort(unique(rValues$clusters))
         clusterNumbers <- clusterNumbers[clusterNumbers != 0]
         
@@ -662,7 +651,6 @@ server <- function(input, output, session) {
           return()
         }
         
-        # Usar módulo para salvar com a lista de clusters solares
         insertedCount <- saveClustersToDB(
           imageName, 
           clusterNumbers, 
@@ -678,7 +666,6 @@ server <- function(input, output, session) {
           db_config$password
         )
         
-        # Atualizar status
         solarCount <- length(rValues$solarClusters)
         rValues$dbStatus <- paste0(
           "Sucesso! ", insertedCount, " clusters salvos.\n",
@@ -691,7 +678,6 @@ server <- function(input, output, session) {
     })
   })
   
-  # Renderizar status do DB
   output$dbStatus <- renderText({
     rValues$dbStatus
   })
